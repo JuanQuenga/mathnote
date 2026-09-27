@@ -1,0 +1,66 @@
+# MathNote development build
+
+MathNote is a native Android notebook for handwriting Calculus II solutions. The app keeps notebooks, pages, pressure samples, undo and redo, and eraser edits in private tablet storage. It works for writing without a server. S Pen input is accepted by default; Settings can enable finger writing if needed. Tutor marks draw over the ink and disappear when the page changes.
+
+## Install on the Galaxy Tab
+
+Open the repository's **Releases → MathNote development APK** page on the tablet, download `MathNote-debug.apk`, and allow installation from the browser or file manager when Android asks. This is a debug build. A newer development APK may have a different debug signing key, in which case uninstall the old test app first. Uninstalling deletes its private notes, so export or back them up first if they matter.
+
+The GitHub workflow builds and publishes a new debug APK on each push to `main`. The Linux development box currently has no Java, Gradle, Android SDK, emulator, or connected tablet, so Android runtime behavior must be tested on the tablet. The server and MCP flow have automated tests.
+
+## Use a ChatGPT subscription
+
+`Check in ChatGPT` opens Android's share sheet with a PNG page snapshot and a tutor prompt. Choose the ChatGPT app, sign in with your own account, and ask it to review the page. `ChatGPT voice` shares the same page so you can continue in the ChatGPT app's voice mode. The share sheet may require pasting the prompt if the receiving app does not preserve accompanying text.
+
+For interactive teacher marks, MathNote has an opt-in `Live sync` button. It sends the current page to **your own Linux server** after a 2.5-second writing pause and checks for new marks every five seconds while the app is open. The MCP server exposes three tools to an AI host: list synced pages, read a PNG page, and place highlights, underlines, arrows, or short notes at normalized coordinates. A Codex session can connect to the local stdio server now. ChatGPT's current [developer-mode guide](https://developers.openai.com/api/docs/guides/developer-mode) says Plus and Pro users can connect remote MCP tools, including write tools, on **web**. ChatGPT must initiate the read and mark actions during a conversation; MathNote cannot start a ChatGPT turn by itself. The [mobile voice guide](https://help.openai.com/en/articles/20001274-chatgpt-voice) says voice can use available plugins, but this specific custom MCP flow has not been tested on the ChatGPT Android app. Other [Help Center guidance](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt) gives narrower plan and mobile availability, so do not rely on mobile MCP until confirmed in your account.
+
+The MCP endpoint binds to loopback by default and **does not implement user OAuth**. Keep it local for Codex testing. Connecting it to ChatGPT web requires a remote HTTPS MCP endpoint and user authorization before exposing private pages. OpenAI's [MCP authentication guide](https://developers.openai.com/plugins/build/auth) requires OAuth for private user data and write actions. A personal development tunnel is possible, but this repository does not configure or publish one. OpenAI's [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) uses a Platform runtime key, so it is not the no-Platform-account route requested here.
+
+ChatGPT subscription billing and API billing are [separate](https://help.openai.com/en/articles/9039756-managing-billing-for-chatgpt-and-the-api-platform). This project does not use the OpenAI API, does not ask for an API key, and cannot authenticate directly into ChatGPT from the Android app. The subscription-powered path runs inside ChatGPT or Codex through user-selected sharing and tools. Automatic checks inside MathNote use only a local model.
+
+## Start the Linux server
+
+The HTTP bridge uses Python's standard library. For local mock testing:
+
+```bash
+cd server
+export MATHNOTE_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
+export MATHNOTE_HOST=0.0.0.0
+export MATHNOTE_MOCK=1
+python3 server.py
+```
+
+Use a terminal on the Linux box to find its LAN IP address. In MathNote Settings, enter `http://LAN_IP:8765` and the same `MATHNOTE_TOKEN`. Connect tablet and Linux box to the same trusted network. Notes remain on the tablet even if the server stops. `MATHNOTE_HOST=0.0.0.0` is needed only for tablet access. The development connection is plain HTTP, so use it on a trusted LAN; a public deployment needs HTTPS and per-user authentication.
+
+To try a local image model, install [Ollama](https://ollama.com/) on the Linux box and pull a vision model such as `qwen3-vl:2b`. Then run `server.py` without `MATHNOTE_MOCK=1`. The model can be changed with `MATHNOTE_MODEL`. This Linux box has about 7.4 GiB RAM and no Ollama installation, so actual model performance and handwritten calculus accuracy have **not** been verified here. The local model's feedback is an aid, not a correctness guarantee.
+
+In Settings, automatic feedback is off by default. If enabled, the app waits 2.5 seconds after writing and checks no more often than the chosen 30 seconds, one minute, two minutes, or five minutes. The server also caps automatic checks at 40 per day. Manual checks remain available. The local voice button uses Android speech recognition to turn a spoken question into text, sends the text and page image to your server, and speaks the returned text with Android Text-to-Speech. On-device recognition is preferred when Android offers it; otherwise the Android speech service may need connectivity. The app does not send a raw microphone recording to the MathNote server.
+
+## Run and test the MCP bridge
+
+```bash
+cd server
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m unittest -v test_flow
+```
+
+After enabling `Live sync` on the tablet, run the MCP server locally in stdio mode:
+
+```bash
+cd server
+.venv/bin/python mcp_server.py
+```
+
+Point Codex's MCP configuration at this command, or use the CLI form below with absolute paths:
+
+```bash
+codex mcp add mathnote -- /absolute/path/to/server/.venv/bin/python /absolute/path/to/server/mcp_server.py
+codex mcp list
+```
+
+The MCP server and HTTP bridge read and write the same `server/data` directory. For ChatGPT developer-mode testing, `MATHNOTE_MCP_TRANSPORT=streamable-http` serves `/mcp` on `127.0.0.1:8766`; a properly authenticated HTTPS proxy is still needed before registering it as a remote ChatGPT plugin. The local MCP protocol, image return, and annotation write are covered by `test_flow.py`. A real ChatGPT connection has not been tested.
+
+## Current test scope
+
+The server test exercises mock manual and automatic feedback, the auto rate limit, spoken-question text flow, authenticated sync, stale-revision rejection, MCP image reading, and MCP annotation writing. It does not simulate an S Pen, Android file persistence, Android speech services, the ChatGPT share sheet, a real vision model, or the remote ChatGPT MCP connection. Use the tablet APK to test those paths and report what happens.
