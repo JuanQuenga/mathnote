@@ -58,21 +58,19 @@ def get_page(page_id):
 
 
 def get_annotations(page_id):
-    metadata, _ = get_page(page_id)
-    path = _path(page_id, ".marks.json")
     with LOCK:
+        metadata = json.loads(_path(page_id, ".json").read_text())
+        path = _path(page_id, ".marks.json")
         if not path.exists():
-            return {"page_id": page_id, "revision": metadata["revision"], "marks": []}
+            return {"page_id": page_id, "revision": metadata["revision"], "marks": [], "feedback": ""}
         annotations = json.loads(path.read_text())
-    if annotations.get("revision") != metadata["revision"]:
-        return {"page_id": page_id, "revision": metadata["revision"], "marks": []}
-    return annotations
+        if annotations.get("revision") != metadata["revision"]:
+            return {"page_id": page_id, "revision": metadata["revision"], "marks": [], "feedback": ""}
+        return {"page_id": page_id, "revision": metadata["revision"],
+                "marks": annotations.get("marks", []), "feedback": annotations.get("feedback", "")}
 
 
 def save_annotations(page_id, revision, marks):
-    metadata, _ = get_page(page_id)
-    if revision != metadata["revision"]:
-        raise ValueError("The page changed; read it again before marking it")
     if not isinstance(marks, list) or len(marks) > 20:
         raise ValueError("Supply at most 20 marks")
     clean = []
@@ -90,7 +88,36 @@ def save_annotations(page_id, revision, marks):
         if not isinstance(text, str) or len(text) > 160:
             raise ValueError("Mark text is too long")
         clean.append({"kind": mark["kind"], "points": points, "text": text})
-    result = {"page_id": page_id, "revision": revision, "marks": clean}
     with LOCK:
+        current = get_annotations(page_id)
+        if revision != current["revision"]:
+            raise ValueError("The page changed; read it again before marking it")
+        result = {"page_id": page_id, "revision": revision, "marks": clean,
+                  "feedback": current["feedback"]}
+        _atomic(_path(page_id, ".marks.json"), json.dumps(result).encode())
+    return result
+
+
+def save_feedback(page_id, revision, feedback):
+    """Set a short spoken/written tutor explanation without replacing visual marks."""
+    if not isinstance(feedback, str) or len(feedback) > 1200:
+        raise ValueError("Feedback must be at most 1200 characters")
+    with LOCK:
+        current = get_annotations(page_id)
+        if revision != current["revision"]:
+            raise ValueError("The page changed; read it again before giving feedback")
+        result = {"page_id": page_id, "revision": revision, "marks": current["marks"],
+                  "feedback": feedback}
+        _atomic(_path(page_id, ".marks.json"), json.dumps(result).encode())
+    return result
+
+
+def clear_feedback(page_id, revision):
+    """Remove every tutor mark and explanation without changing student ink."""
+    with LOCK:
+        current = get_annotations(page_id)
+        if revision != current["revision"]:
+            raise ValueError("The page changed; read it again before clearing feedback")
+        result = {"page_id": page_id, "revision": revision, "marks": [], "feedback": ""}
         _atomic(_path(page_id, ".marks.json"), json.dumps(result).encode())
     return result

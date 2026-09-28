@@ -27,12 +27,14 @@ import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
+import kotlin.math.max
 
 class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
@@ -40,6 +42,7 @@ class MainActivity : Activity() {
     private lateinit var store: NoteStore
     private lateinit var ink: InkView
     private lateinit var title: TextView
+    private lateinit var toolLabel: TextView
     private lateinit var state: TextView
     private lateinit var feedback: TextView
     private lateinit var liveButton: Button
@@ -58,6 +61,13 @@ class MainActivity : Activity() {
     private var token = ""
     private var liveSync = false
     private var syncRevision = ""
+    private var editGeneration = 0L
+    private var resumed = false
+    private var savedTool = InkView.Tool.PEN
+    private var savedPenColor = 0xff192337.toInt()
+    private var savedHighlighterColor = 0xffffd54f.toInt()
+    private var savedPenWidth = 4.4f
+    private var savedHighlighterWidth = 20f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -101,6 +111,12 @@ class MainActivity : Activity() {
             textSize = 20f
         }
         header.addView(title, LinearLayout.LayoutParams(0, dp(48), 1f))
+        toolLabel = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(toolLabel, LinearLayout.LayoutParams(-2, dp(48)))
         root.addView(header)
         val scroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         val bar = LinearLayout(this).apply { setPadding(dp(4), 0, dp(4), 0) }
@@ -114,11 +130,17 @@ class MainActivity : Activity() {
                 openPage(store.currentBook, page)
             }
         }
-        button("Black", bar) { ink.setColor(0xff192337.toInt()) }
-        button("Blue", bar) { ink.setColor(0xff1559bf.toInt()) }
-        button("Red", bar) { ink.setColor(0xffbc364a.toInt()) }
-        button("Green", bar) { ink.setColor(0xff16835d.toInt()) }
-        button("Eraser", bar) { ink.setEraser(); showState("Eraser removes a touched stroke.") }
+        button("Pen", bar) { selectTool(InkView.Tool.PEN) }
+        button("Highlighter", bar) { selectTool(InkView.Tool.HIGHLIGHTER) }
+        button("Eraser", bar) { selectTool(InkView.Tool.ERASER) }
+        button("Width", bar) { chooseWidth() }
+        button("Black", bar) { selectColor(0xff192337.toInt()) }
+        button("Blue", bar) { selectColor(0xff1559bf.toInt()) }
+        button("Red", bar) { selectColor(0xffbc364a.toInt()) }
+        button("Green", bar) { selectColor(0xff16835d.toInt()) }
+        button("Purple", bar) { selectColor(0xff7944af.toInt()) }
+        button("Orange", bar) { selectColor(0xffef8b27.toInt()) }
+        button("Yellow", bar) { selectColor(0xffffd54f.toInt()) }
         button("Undo", bar) { ink.undo() }
         button("Redo", bar) { ink.redo() }
         button("Check in ChatGPT", bar) { sharePage(false) }
@@ -126,9 +148,11 @@ class MainActivity : Activity() {
         liveButton = button("Live sync off", bar) { toggleLiveSync() }
         button("Settings", bar) { settings() }
         ink = InkView(this).apply {
+            restoreTools(savedTool, savedPenColor, savedHighlighterColor, savedPenWidth, savedHighlighterWidth)
             setFingerWriting(fingerWriting)
             setListener { edited() }
         }
+        updateToolLabel()
         root.addView(ink, LinearLayout.LayoutParams(-1, 0, 1f))
         val bottom = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -155,10 +179,62 @@ class MainActivity : Activity() {
     }
 
     private fun updateTitle() { title.text = "${store.currentBook.title}  /  ${store.currentPage.title}" }
+    private fun updateToolLabel() { toolLabel.text = "${ink.selectionDescription()}  " }
+    private fun saveToolSettings() {
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putString("selected_tool", ink.selectedTool.name)
+            .putInt("pen_color", ink.penColor)
+            .putInt("highlighter_color", ink.highlighterColor)
+            .putFloat("pen_width", ink.penWidth)
+            .putFloat("highlighter_width", ink.highlighterWidth)
+            .apply()
+        updateToolLabel()
+    }
+    private fun selectTool(tool: InkView.Tool) {
+        ink.setTool(tool)
+        saveToolSettings()
+        showState(if (tool == InkView.Tool.ERASER) "Eraser removes a touched stroke."
+            else "${ink.selectionDescription()} selected. Hold the S Pen side button to erase temporarily.")
+    }
+    private fun selectColor(color: Int) {
+        ink.setColor(color)
+        saveToolSettings()
+    }
+    private fun chooseWidth() {
+        if (ink.selectedTool == InkView.Tool.ERASER) selectTool(InkView.Tool.PEN)
+        val highlighter = ink.selectedTool == InkView.Tool.HIGHLIGHTER
+        val minWidth = if (highlighter) 8 else 1
+        val maxWidth = if (highlighter) 40 else 16
+        val initial = if (highlighter) ink.highlighterWidth else ink.penWidth
+        val label = TextView(this).apply { text = "${initial.toInt()} px"; textSize = 18f }
+        val slider = SeekBar(this).apply {
+            max = maxWidth - minWidth
+            progress = initial.toInt() - minWidth
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    label.text = "${minWidth + progress} px"
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            })
+        }
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(12), dp(24), 0)
+            addView(label)
+            addView(slider)
+        }
+        AlertDialog.Builder(this).setTitle(if (highlighter) "Highlighter width" else "Pen width")
+            .setView(form).setPositiveButton("Apply") { _, _ ->
+                ink.setStrokeWidth((minWidth + slider.progress).toFloat())
+                saveToolSettings()
+            }.setNegativeButton("Cancel", null).show()
+    }
     private fun showState(message: String) { if (::state.isInitialized) state.text = message }
     private fun cancel(task: Runnable?) { task?.let { handler.removeCallbacks(it) } }
 
     private fun edited() {
+        editGeneration++
         cancel(pendingSave)
         pendingSave = Runnable { saveNow() }.also { handler.postDelayed(it, 450) }
         ink.setAnnotations(null)
@@ -167,12 +243,17 @@ class MainActivity : Activity() {
         cancel(pollMarks)
         if (liveSync) pendingSync = Runnable { syncPage() }.also { handler.postDelayed(it, 2500) }
         cancel(pendingCheck)
-        if (autoEnabled && ink.hasInk()) {
-            pendingCheck = Runnable {
-                val now = SystemClock.elapsedRealtime()
-                if (!busy && now - lastAutoCheck >= intervalSeconds * 1000L) check(true, false)
-            }.also { handler.postDelayed(it, 2500) }
-        }
+        if (autoEnabled && ink.hasInk()) scheduleAutoCheck(editGeneration)
+    }
+
+    private fun scheduleAutoCheck(generation: Long) {
+        cancel(pendingCheck)
+        val remaining = if (lastAutoCheck == 0L) 0L
+            else intervalSeconds * 1000L - (SystemClock.elapsedRealtime() - lastAutoCheck)
+        pendingCheck = Runnable {
+            if (generation != editGeneration || !autoEnabled || !ink.hasInk()) return@Runnable
+            if (busy) scheduleAutoCheck(generation) else check(true, false)
+        }.also { handler.postDelayed(it, max(2500L, remaining)) }
     }
 
     private fun saveNow() {
@@ -183,6 +264,7 @@ class MainActivity : Activity() {
     }
 
     private fun openPage(book: NoteStore.Book, page: NoteStore.Page) {
+        editGeneration++
         cancel(pendingCheck)
         cancel(pendingSync)
         cancel(pollMarks)
@@ -234,6 +316,13 @@ class MainActivity : Activity() {
         autoEnabled = prefs.getBoolean("auto", false)
         intervalSeconds = prefs.getInt("interval", 60)
         fingerWriting = prefs.getBoolean("finger", false)
+        savedTool = runCatching {
+            InkView.Tool.valueOf(prefs.getString("selected_tool", InkView.Tool.PEN.name) ?: InkView.Tool.PEN.name)
+        }.getOrDefault(InkView.Tool.PEN)
+        savedPenColor = prefs.getInt("pen_color", savedPenColor)
+        savedHighlighterColor = prefs.getInt("highlighter_color", savedHighlighterColor)
+        savedPenWidth = prefs.getFloat("pen_width", savedPenWidth)
+        savedHighlighterWidth = prefs.getFloat("highlighter_width", savedHighlighterWidth)
     }
 
     private fun restoreLastPage() {
@@ -328,6 +417,7 @@ class MainActivity : Activity() {
         cancel(pollMarks)
         val pageId = store.currentPage.id
         val pageTitle = store.currentPage.title
+        val generation = editGeneration
         val strokes = snapshot()
         val address = server
         val auth = token
@@ -337,7 +427,7 @@ class MainActivity : Activity() {
                     .put("image", TutorClient.image(strokes))
                 val response = TutorClient.post(address, auth, "/sync", request)
                 runOnUiThread {
-                    if (!liveSync || pageId != store.currentPage.id) return@runOnUiThread
+                    if (!liveSync || pageId != store.currentPage.id || generation != editGeneration) return@runOnUiThread
                     syncRevision = response.optString("revision")
                     showState("Page synced. Waiting for tutor marks from ChatGPT or Codex.")
                     refreshMarks()
@@ -363,6 +453,7 @@ class MainActivity : Activity() {
                         val marks = result.optJSONArray("marks")
                         ink.setAnnotations(marks)
                         if (marks != null && marks.length() > 0) showState("Tutor marks are displayed over your work.")
+                        result.optString("feedback").takeIf { it.isNotBlank() }?.let { feedback.text = it }
                     }
                     scheduleMarkPoll()
                 }
@@ -373,7 +464,7 @@ class MainActivity : Activity() {
     }
 
     private fun scheduleMarkPoll() {
-        if (liveSync) pollMarks = Runnable { refreshMarks() }.also { handler.postDelayed(it, 5000) }
+        if (liveSync && resumed) pollMarks = Runnable { refreshMarks() }.also { handler.postDelayed(it, 5000) }
     }
 
     private fun check(automatic: Boolean, reveal: Boolean) {
@@ -511,13 +602,18 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
+        resumed = false
         cancel(pollMarks)
         cancel(pendingSync)
-        if (::ink.isInitialized) saveNow()
+        if (::ink.isInitialized) {
+            saveNow()
+            if (liveSync) syncPage()
+        }
     }
 
     override fun onResume() {
         super.onResume()
+        resumed = true
         if (liveSync && ::ink.isInitialized) syncPage()
     }
 

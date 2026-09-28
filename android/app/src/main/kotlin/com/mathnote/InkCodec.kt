@@ -10,7 +10,8 @@ object InkCodec {
         strokes.forEach { stroke ->
             val dots = JSONArray()
             stroke.dots.forEach { dot -> dots.put(JSONArray().put(dot.x).put(dot.y).put(dot.pressure)) }
-            all.put(JSONObject().put("color", stroke.color).put("size", stroke.size).put("dots", dots))
+            all.put(JSONObject().put("color", stroke.color).put("size", stroke.size)
+                .put("tool", stroke.tool.name.lowercase()).put("dots", dots))
         }
         return all.toString()
     }
@@ -20,11 +21,15 @@ object InkCodec {
         MutableList(all.length()) { index ->
             val item = all.getJSONObject(index)
             val dots = item.getJSONArray("dots")
+            val tool = when (item.optString("tool")) {
+                "highlighter" -> InkView.Tool.HIGHLIGHTER
+                else -> InkView.Tool.PEN // Old pages had no tool field.
+            }
             InkView.Stroke(item.getInt("color"), item.getDouble("size").toFloat(),
                 MutableList(dots.length()) { pointIndex ->
                     val point = dots.getJSONArray(pointIndex)
                     InkView.Dot(point.getDouble(0).toFloat(), point.getDouble(1).toFloat(), point.getDouble(2).toFloat())
-                })
+                }, tool)
         }
     } catch (_: Exception) {
         mutableListOf()

@@ -17,8 +17,10 @@ import kotlin.math.sin
 
 /** Stores normalized points and pressure so ink survives rotation and page reopening. */
 class InkView(context: Context) : View(context) {
+    enum class Tool { PEN, HIGHLIGHTER, ERASER }
     data class Dot(val x: Float, val y: Float, val pressure: Float)
-    data class Stroke(val color: Int, val size: Float, val dots: MutableList<Dot> = mutableListOf())
+    data class Stroke(val color: Int, val size: Float, val dots: MutableList<Dot> = mutableListOf(),
+                      val tool: Tool = Tool.PEN)
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val inkStrokes = mutableListOf<Stroke>()
@@ -26,11 +28,23 @@ class InkView(context: Context) : View(context) {
     private val redoHistory = mutableListOf<String>()
     private var active: Stroke? = null
     private var activePointer = -1
-    private var inkColor = Color.rgb(25, 35, 55)
-    private var erasing = false
+    var selectedTool = Tool.PEN
+        private set
+    private var lastInkTool = Tool.PEN
+    var penColor = Color.rgb(25, 35, 55)
+        private set
+    var highlighterColor = 0xffffd54f.toInt()
+        private set
+    var penWidth = 4.4f
+        private set
+    var highlighterWidth = 20f
+        private set
     private var fingerWriting = false
     private var eraseChanged = false
     private var strokeEraser = false
+    private var stylusStream = false
+    private var physicalEraser = false
+    private var gestureInkAdded = false
     private val density = resources.displayMetrics.density
     private var listener: (() -> Unit)? = null
     private var annotations = JSONArray()
@@ -43,8 +57,33 @@ class InkView(context: Context) : View(context) {
     }
 
     fun setListener(value: () -> Unit) { listener = value }
-    fun setColor(value: Int) { inkColor = value; erasing = false }
-    fun setEraser() { erasing = true }
+    fun setTool(value: Tool) {
+        selectedTool = value
+        if (value != Tool.ERASER) lastInkTool = value
+    }
+    fun setColor(value: Int) {
+        if (selectedTool == Tool.ERASER) selectedTool = lastInkTool
+        if (selectedTool == Tool.HIGHLIGHTER) highlighterColor = value or 0xff000000.toInt()
+        else penColor = value or 0xff000000.toInt()
+    }
+    fun setStrokeWidth(value: Float) {
+        if (selectedTool == Tool.ERASER) selectedTool = lastInkTool
+        if (selectedTool == Tool.HIGHLIGHTER) highlighterWidth = value.coerceIn(8f, 40f)
+        else penWidth = value.coerceIn(1f, 16f)
+    }
+    fun restoreTools(tool: Tool, penColor: Int, highlighterColor: Int, penWidth: Float, highlighterWidth: Float) {
+        this.penColor = penColor or 0xff000000.toInt()
+        this.highlighterColor = highlighterColor or 0xff000000.toInt()
+        this.penWidth = penWidth.coerceIn(1f, 16f)
+        this.highlighterWidth = highlighterWidth.coerceIn(8f, 40f)
+        setTool(tool)
+    }
+    fun selectionDescription(): String = when (selectedTool) {
+        Tool.PEN -> "Pen ${penWidth.toInt()} px"
+        Tool.HIGHLIGHTER -> "Highlighter ${highlighterWidth.toInt()} px"
+        Tool.ERASER -> "Eraser"
+    }
+    fun setEraser() { setTool(Tool.ERASER) }
     fun setFingerWriting(value: Boolean) { fingerWriting = value }
     fun hasInk() = inkStrokes.isNotEmpty()
     fun clearHistory() { undoHistory.clear(); redoHistory.clear() }
@@ -184,6 +223,27 @@ class InkView(context: Context) : View(context) {
         }
     }
 
+    private fun beginMode(buttonState: Int) {
+        val buttonEraser = stylusStream && buttonState and
+            (MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY) != 0
+        val shouldErase = selectedTool == Tool.ERASER || physicalEraser || buttonEraser
+        if (shouldErase == strokeEraser) return
+        active?.takeIf { it.dots.isNotEmpty() }?.let {
+            inkStrokes.add(it)
+            inkDirty = true
+            gestureInkAdded = true
+        }
+        active = null
+        strokeEraser = shouldErase
+        if (!shouldErase) active = newStroke()
+    }
+
+    private fun newStroke(): Stroke = when (selectedTool) {
+        Tool.HIGHLIGHTER -> Stroke(highlighterColor, highlighterWidth, tool = Tool.HIGHLIGHTER)
+        Tool.PEN -> Stroke(penColor, penWidth)
+        Tool.ERASER -> error("Eraser cannot create an ink stroke")
+    }
+
     private fun near(stroke: Stroke, x: Float, y: Float, radius: Float): Boolean {
         for (i in stroke.dots.indices) {
             val a = stroke.dots[i]
@@ -206,9 +266,14 @@ class InkView(context: Context) : View(context) {
                 !(fingerWriting && type == MotionEvent.TOOL_TYPE_FINGER)) return true
             activePointer = event.getPointerId(index)
             eraseChanged = false
-            strokeEraser = erasing || type == MotionEvent.TOOL_TYPE_ERASER
+            gestureInkAdded = false
+            stylusStream = type == MotionEvent.TOOL_TYPE_STYLUS || type == MotionEvent.TOOL_TYPE_ERASER
+            physicalEraser = type == MotionEvent.TOOL_TYPE_ERASER
+            strokeEraser = selectedTool == Tool.ERASER || physicalEraser ||
+                (stylusStream && event.buttonState and
+                    (MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY) != 0)
             checkpoint()
-            if (!strokeEraser) active = Stroke(inkColor, 4.4f)
+            if (!strokeEraser) active = newStroke()
             addSample(event, index, -1)
             invalidate()
             return true
@@ -221,22 +286,33 @@ class InkView(context: Context) : View(context) {
             restore(undoHistory.removeAt(undoHistory.lastIndex))
             active = null
             activePointer = -1
+            stylusStream = false
+            physicalEraser = false
             return true
         }
-        if (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
+        if (action == MotionEvent.ACTION_BUTTON_PRESS || action == MotionEvent.ACTION_BUTTON_RELEASE ||
+            action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
             val pointerIndex = event.findPointerIndex(activePointer)
             if (pointerIndex >= 0) {
+                if (action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_POINTER_UP)
+                    beginMode(event.buttonState)
                 for (i in 0 until event.historySize) addSample(event, pointerIndex, i)
                 addSample(event, pointerIndex, -1)
             }
             val finished = action == MotionEvent.ACTION_UP ||
                 (action == MotionEvent.ACTION_POINTER_UP && event.getPointerId(index) == activePointer)
             if (finished) {
-                active?.takeIf { it.dots.isNotEmpty() }?.let { inkStrokes.add(it); inkDirty = true }
-                if (active != null || eraseChanged) listener?.invoke()
+                active?.takeIf { it.dots.isNotEmpty() }?.let {
+                    inkStrokes.add(it)
+                    inkDirty = true
+                    gestureInkAdded = true
+                }
+                if (gestureInkAdded || eraseChanged) listener?.invoke()
                 else if (undoHistory.isNotEmpty()) undoHistory.removeAt(undoHistory.lastIndex)
                 active = null
                 activePointer = -1
+                stylusStream = false
+                physicalEraser = false
             }
             invalidate()
             return true
@@ -244,11 +320,18 @@ class InkView(context: Context) : View(context) {
         return true
     }
 
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (activePointer >= 0 && (event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS ||
+            event.actionMasked == MotionEvent.ACTION_BUTTON_RELEASE)) return onTouchEvent(event)
+        return super.onGenericMotionEvent(event)
+    }
+
     companion object {
         fun drawStroke(canvas: Canvas, stroke: Stroke, width: Int, height: Int) {
             if (stroke.dots.isEmpty()) return
             val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = stroke.color
+                color = if (stroke.tool == Tool.HIGHLIGHTER) stroke.color and 0x00ffffff or 0x77000000
+                    else stroke.color
                 style = Paint.Style.STROKE
                 strokeCap = Paint.Cap.ROUND
                 strokeJoin = Paint.Join.ROUND
@@ -257,13 +340,16 @@ class InkView(context: Context) : View(context) {
             if (stroke.dots.size == 1) {
                 val d = stroke.dots[0]
                 p.style = Paint.Style.FILL
-                canvas.drawCircle(d.x * width, d.y * height, max(1f, stroke.size * d.pressure * scale / 2f), p)
+                val diameter = if (stroke.tool == Tool.HIGHLIGHTER) stroke.size * scale
+                    else stroke.size * d.pressure * scale
+                canvas.drawCircle(d.x * width, d.y * height, max(1f, diameter / 2f), p)
                 return
             }
             for (i in 1 until stroke.dots.size) {
                 val a = stroke.dots[i - 1]
                 val b = stroke.dots[i]
-                p.strokeWidth = max(1f, stroke.size * (a.pressure + b.pressure) * .5f * scale)
+                p.strokeWidth = if (stroke.tool == Tool.HIGHLIGHTER) stroke.size * scale
+                    else max(1f, stroke.size * (a.pressure + b.pressure) * .5f * scale)
                 canvas.drawLine(a.x * width, a.y * height, b.x * width, b.y * height, p)
             }
         }

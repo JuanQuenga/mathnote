@@ -94,7 +94,8 @@ class FlowTest(unittest.TestCase):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     names = [tool.name for tool in (await session.list_tools()).tools]
-                    self.assertEqual(set(names), {"list_synced_pages", "get_page", "mark_page"})
+                    self.assertEqual(set(names), {"list_synced_pages", "get_page", "mark_page",
+                                                  "write_feedback", "clear_tutor_feedback"})
                     pages = await session.call_tool("list_synced_pages")
                     self.assertFalse(pages.isError)
                     page = await session.call_tool("get_page", {"page_id": PAGE})
@@ -105,6 +106,29 @@ class FlowTest(unittest.TestCase):
                         "marks": [{"kind": "arrow", "points": [[.2,.3],[.4,.5]], "text": "Try the power rule"}]})
                     self.assertFalse(mark.isError)
                     self.assertEqual(sync_store.get_annotations(PAGE)["marks"][0]["kind"], "arrow")
+                    note = await session.call_tool("write_feedback", {"page_id": PAGE, "revision": rev,
+                        "feedback": "The exponent increases before dividing. What does the power rule suggest?"})
+                    self.assertFalse(note.isError)
+                    self.assertIn("power rule", sync_store.get_annotations(PAGE)["feedback"])
+                    self.assertEqual(len(sync_store.get_annotations(PAGE)["marks"]), 1)
+                    req = urllib.request.Request(self.base + "/annotations?page_id=" + PAGE,
+                        headers={"X-Device-Token": "test-token"})
+                    with urllib.request.urlopen(req) as response:
+                        self.assertIn("power rule", json.load(response)["feedback"])
+                    stale = await session.call_tool("write_feedback", {"page_id": PAGE, "revision": "old",
+                        "feedback": "Stale"})
+                    self.assertTrue(stale.isError)
+                    too_long = await session.call_tool("write_feedback", {"page_id": PAGE, "revision": rev,
+                        "feedback": "x" * 1201})
+                    self.assertTrue(too_long.isError)
+                    cleared = await session.call_tool("clear_tutor_feedback", {"page_id": PAGE, "revision": rev})
+                    self.assertFalse(cleared.isError)
+                    self.assertEqual(sync_store.get_annotations(PAGE)["marks"], [])
+                    self.assertEqual(sync_store.get_annotations(PAGE)["feedback"], "")
+                    sync_store.sync_page(PAGE, "Integration", PNG + b"\x00")
+                    stale_clear = await session.call_tool("clear_tutor_feedback", {"page_id": PAGE,
+                        "revision": rev})
+                    self.assertTrue(stale_clear.isError)
         asyncio.run(flow())
 
     def test_mcp_streamable_http(self):
