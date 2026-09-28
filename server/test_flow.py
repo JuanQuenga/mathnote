@@ -45,7 +45,10 @@ class FlowTest(unittest.TestCase):
             with urllib.request.urlopen(req) as result:
                 return result.status, json.load(result)
         except urllib.error.HTTPError as error:
-            return error.code, json.load(error)
+            try:
+                return error.code, json.load(error)
+            finally:
+                error.close()
 
     def test_handwriting_image_manual_auto_and_voice(self):
         image = base64.b64encode(PNG).decode()
@@ -68,6 +71,12 @@ class FlowTest(unittest.TestCase):
         self.assertIn("power rule", voice["reply"])
         status, denied = self.post("/check", {"image": image}, token="wrong")
         self.assertEqual(status, 401)
+
+    def test_unreadable_math_is_not_reported_as_correct(self):
+        raw = json.dumps({"status": "looks_good", "step": "",
+                          "explanation": "There are no readable mathematical expressions on this page.",
+                          "hint": "", "answer": ""})
+        self.assertEqual(server.sanitize_feedback(raw)["status"], "unclear")
 
     def test_sync_annotations_and_revision(self):
         image = base64.b64encode(PNG).decode()
