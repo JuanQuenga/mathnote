@@ -1,4 +1,5 @@
 server/.venv/
+gateway/.venv/
 server/.local-tools/
 server/data/
 server/__pycache__/

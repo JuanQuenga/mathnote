@@ -1,0 +1,7 @@
+# Set MATHNOTE_DOMAIN to a public DNS name that resolves to this Linux host.
+# Caddy obtains and renews its public TLS certificate. Expose only 80/443;
+# keep the Python gateway and tablet sync service on their private interfaces.
+{$MATHNOTE_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8770
+}

@@ -7,6 +7,7 @@ import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -42,6 +43,7 @@ class MainActivity : Activity() {
     private lateinit var store: NoteStore
     private lateinit var ink: InkView
     private lateinit var title: TextView
+    private lateinit var colorSwatch: TextView
     private lateinit var toolLabel: TextView
     private lateinit var state: TextView
     private lateinit var feedback: TextView
@@ -111,6 +113,10 @@ class MainActivity : Activity() {
             textSize = 20f
         }
         header.addView(title, LinearLayout.LayoutParams(0, dp(48), 1f))
+        colorSwatch = TextView(this).apply {
+            text = " "
+        }
+        header.addView(colorSwatch, LinearLayout.LayoutParams(dp(20), dp(20)))
         toolLabel = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 14f
@@ -179,7 +185,19 @@ class MainActivity : Activity() {
     }
 
     private fun updateTitle() { title.text = "${store.currentBook.title}  /  ${store.currentPage.title}" }
-    private fun updateToolLabel() { toolLabel.text = "${ink.selectionDescription()}  " }
+    private fun updateToolLabel() {
+        toolLabel.text = " ${ink.selectionDescription()}  "
+        val color = when (ink.selectedTool) {
+            InkView.Tool.PEN -> ink.penColor
+            InkView.Tool.HIGHLIGHTER -> ink.highlighterColor
+            InkView.Tool.ERASER -> Color.LTGRAY
+        }
+        colorSwatch.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(color)
+            setStroke(dp(1), Color.WHITE)
+        }
+    }
     private fun saveToolSettings() {
         getSharedPreferences("settings", MODE_PRIVATE).edit()
             .putString("selected_tool", ink.selectedTool.name)
