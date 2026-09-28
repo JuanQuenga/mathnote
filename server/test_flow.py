@@ -2,6 +2,8 @@ import asyncio
 import base64
 import json
 import os
+import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -104,6 +106,37 @@ class FlowTest(unittest.TestCase):
                     self.assertFalse(mark.isError)
                     self.assertEqual(sync_store.get_annotations(PAGE)["marks"][0]["kind"], "arrow")
         asyncio.run(flow())
+
+    def test_mcp_streamable_http(self):
+        sync_store.sync_page(PAGE, "Integration", PNG)
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        environment = os.environ.copy()
+        environment.update({"MATHNOTE_MCP_TRANSPORT": "streamable-http", "MATHNOTE_MCP_PORT": str(port)})
+        process = subprocess.Popen([sys.executable, str(Path(__file__).parent / "mcp_server.py")],
+                                   env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            for _ in range(40):
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=.2): break
+                except OSError:
+                    if process.poll() is not None: self.fail("MCP HTTP server exited early")
+                    import time
+                    time.sleep(.1)
+            else: self.fail("MCP HTTP server did not start")
+            async def flow():
+                async with streamablehttp_client(f"http://127.0.0.1:{port}/mcp") as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        page = await session.call_tool("get_page", {"page_id": PAGE})
+                        self.assertFalse(page.isError)
+                        self.assertTrue(any(part.type == "image" for part in page.content))
+            asyncio.run(flow())
+        finally:
+            process.terminate(); process.wait(timeout=5)
 
 
 if __name__ == "__main__":

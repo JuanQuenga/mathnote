@@ -10,6 +10,10 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent, ToolAnnotations
 from sync_store import get_page as read_synced_page, list_pages, save_annotations
 
+MCP_HOST = os.getenv("MATHNOTE_MCP_HOST", "127.0.0.1")
+if MCP_HOST not in ("127.0.0.1", "localhost", "::1") and os.getenv("MATHNOTE_MCP_UNSAFE_REMOTE") != "1":
+    raise SystemExit("MCP has no user auth. Keep it on loopback or explicitly set MATHNOTE_MCP_UNSAFE_REMOTE=1 for isolated testing.")
+
 app = FastMCP(
     "MathNote",
     instructions=("Help the student with their current Calculus II page. Read the synced "
@@ -18,7 +22,7 @@ app = FastMCP(
         "and give a hint before the full answer. Use mark_page to draw helpful marks "
         "over the student's ink. Coordinates are normalized 0..1. Re-read the page "
         "if its revision changed."),
-    host=os.getenv("MATHNOTE_MCP_HOST", "127.0.0.1"),
+    host=MCP_HOST,
     port=int(os.getenv("MATHNOTE_MCP_PORT", "8766")),
     stateless_http=True,
     json_response=True,
