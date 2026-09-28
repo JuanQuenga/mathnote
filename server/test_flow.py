@@ -78,6 +78,18 @@ class FlowTest(unittest.TestCase):
                           "hint": "", "answer": ""})
         self.assertEqual(server.sanitize_feedback(raw)["status"], "unclear")
 
+    def test_hint_first_filter_removes_completed_math(self):
+        raw = json.dumps({"status": "issue", "step": "Step 2 should be x^3/3 + C",
+                          "explanation": "The correct result is x^3/3 + C. The exponent was not increased before dividing.",
+                          "hint": "Think about the power rule before dividing.",
+                          "answer": "x^3/3 + C"})
+        hidden = server.sanitize_feedback(raw)
+        self.assertEqual(hidden["step"], "Step 2")
+        self.assertNotIn("x^3/3", hidden["explanation"] + hidden["hint"])
+        self.assertIn("exponent", hidden["explanation"])
+        self.assertEqual(hidden["answer"], "")
+        self.assertEqual(server.sanitize_feedback(raw, reveal=True)["answer"], "x^3/3 + C")
+
     def test_sync_annotations_and_revision(self):
         image = base64.b64encode(PNG).decode()
         status, synced = self.post("/sync", {"page_id": PAGE, "title": "Integration", "image": image})

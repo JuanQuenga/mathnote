@@ -47,6 +47,10 @@ jobs:
           MATHNOTE_KEYSTORE_FILE: ${{ runner.temp }}/mathnote-dev.p12
           MATHNOTE_KEYSTORE_PASSWORD: ${{ secrets.MATHNOTE_KEYSTORE_PASSWORD }}
         run: gradle --no-daemon :app:assembleDebug
+      - name: Verify stable APK signer
+        run: |
+          actual=$("$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs android/app/build/outputs/apk/debug/app-debug.apk | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          test "$actual" = '0c89e81393f1d046b71aa784105ad13b7bf46e963ec4a73c2843c98615dd45ad'
       - name: Enable emulator acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
