@@ -4,7 +4,7 @@ MathNote is a native Kotlin Android notebook for handwriting Calculus II solutio
 
 ## Install on the Galaxy Tab
 
-Open the repository's **Releases → MathNote development APK** page on the tablet, download `MathNote-debug.apk`, and allow installation from the browser or file manager when Android asks. This is a debug build. A newer development APK may have a different debug signing key, in which case uninstall the old test app first. Uninstalling deletes its private notes, so export or back them up first if they matter.
+Open the repository's **Releases → MathNote development APK** page on the tablet, download `MathNote-debug.apk`, and allow installation from the browser or file manager when Android asks. This is a debug build. Development APKs published from the stable-signing-key workflow can update in place and keep private notes. Builds downloaded before that signing change used a different key and may need a one-time uninstall; uninstalling deletes private notes, so keep any important work before replacing an older build.
 
 The GitHub workflow builds and publishes a new debug APK on each push to `main`. It also runs an Android emulator test for stylus input, the S Pen button eraser, undo/redo, and saved-page reopening. There is no connected Galaxy Tab here, so S Pen hardware behavior still needs a tablet test. The server and MCP flow have automated tests.
 

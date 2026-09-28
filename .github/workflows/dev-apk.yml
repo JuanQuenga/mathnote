@@ -35,8 +35,17 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '9.6.0'
+      - name: Restore stable development signing key
+        env:
+          MATHNOTE_KEYSTORE_B64: ${{ secrets.MATHNOTE_KEYSTORE_B64 }}
+        run: |
+          test -n "$MATHNOTE_KEYSTORE_B64"
+          printf '%s' "$MATHNOTE_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/mathnote-dev.p12"
       - name: Build signed debug APK
         working-directory: android
+        env:
+          MATHNOTE_KEYSTORE_FILE: ${{ runner.temp }}/mathnote-dev.p12
+          MATHNOTE_KEYSTORE_PASSWORD: ${{ secrets.MATHNOTE_KEYSTORE_PASSWORD }}
         run: gradle --no-daemon :app:assembleDebug
       - name: Enable emulator acceleration
         run: |

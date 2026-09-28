@@ -1,5 +1,8 @@
 plugins { id 'com.android.application' }
 
+def stableKeyFile = System.getenv('MATHNOTE_KEYSTORE_FILE')
+def stableKeyPassword = System.getenv('MATHNOTE_KEYSTORE_PASSWORD')
+
 android {
     namespace 'com.mathnote'
     compileSdk 36
@@ -15,6 +18,20 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+    }
+    if (stableKeyFile && stableKeyPassword) {
+        signingConfigs {
+            stableDebug {
+                storeFile file(stableKeyFile)
+                storePassword stableKeyPassword
+                keyAlias 'mathnote-dev'
+                keyPassword stableKeyPassword
+                storeType 'PKCS12'
+            }
+        }
+        buildTypes {
+            debug { signingConfig signingConfigs.stableDebug }
+        }
     }
 }
 
