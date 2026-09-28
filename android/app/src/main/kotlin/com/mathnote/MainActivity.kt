@@ -63,6 +63,7 @@ class MainActivity : Activity() {
     private var token = ""
     private var liveSync = false
     private var syncRevision = ""
+    private var remoteFeedbackShown = false
     private var editGeneration = 0L
     private var resumed = false
     private var savedTool = InkView.Tool.PEN
@@ -253,6 +254,8 @@ class MainActivity : Activity() {
 
     private fun edited() {
         editGeneration++
+        remoteFeedbackShown = false
+        if (::feedback.isInitialized) feedback.text = "Page changed. Ask for a fresh check."
         cancel(pendingSave)
         pendingSave = Runnable { saveNow() }.also { handler.postDelayed(it, 450) }
         ink.setAnnotations(null)
@@ -295,6 +298,7 @@ class MainActivity : Activity() {
         updateTitle()
         ink.setAnnotations(null)
         syncRevision = ""
+        remoteFeedbackShown = false
         feedback.text = "Ready to check this page when you ask."
         if (liveSync) syncPage()
     }
@@ -471,7 +475,14 @@ class MainActivity : Activity() {
                         val marks = result.optJSONArray("marks")
                         ink.setAnnotations(marks)
                         if (marks != null && marks.length() > 0) showState("Tutor marks are displayed over your work.")
-                        result.optString("feedback").takeIf { it.isNotBlank() }?.let { feedback.text = it }
+                        val tutorText = result.optString("feedback")
+                        if (tutorText.isNotBlank()) {
+                            feedback.text = tutorText
+                            remoteFeedbackShown = true
+                        } else if (remoteFeedbackShown) {
+                            feedback.text = "Tutor feedback was cleared."
+                            remoteFeedbackShown = false
+                        }
                     }
                     scheduleMarkPoll()
                 }
@@ -493,6 +504,8 @@ class MainActivity : Activity() {
         if (automatic) lastAutoCheck = SystemClock.elapsedRealtime()
         busy = true
         showState(if (automatic) "Automatic check in progress..." else "Checking this page...")
+        val generation = editGeneration
+        val pageId = store.currentPage.id
         val strokes = snapshot()
         val address = server
         val auth = token
@@ -503,6 +516,10 @@ class MainActivity : Activity() {
                 val response = TutorClient.post(address, auth, "/check", request)
                 runOnUiThread {
                     busy = false
+                    if (generation != editGeneration || pageId != store.currentPage.id) {
+                        showState("Page changed while checking. Ask for fresh feedback.")
+                        return@runOnUiThread
+                    }
                     val heading = when (response.optString("status")) {
                         "issue" -> "Possible issue"
                         "unclear" -> "Writing unclear"
@@ -565,6 +582,8 @@ class MainActivity : Activity() {
     private fun askLocally(question: String) {
         busy = true
         showState("Local tutor is reading the page...")
+        val generation = editGeneration
+        val pageId = store.currentPage.id
         val strokes = snapshot()
         val address = server
         val auth = token
@@ -574,6 +593,10 @@ class MainActivity : Activity() {
                 val response = TutorClient.post(address, auth, "/voice", request)
                 runOnUiThread {
                     busy = false
+                    if (generation != editGeneration || pageId != store.currentPage.id) {
+                        showState("Page changed while the tutor answered. Ask again for this version.")
+                        return@runOnUiThread
+                    }
                     feedback.text = "You: ${response.optString("transcript")}\nTutor: ${response.optString("reply")}"
                     showState("Speaking tutor reply.")
                     speak(response.optString("reply"))
