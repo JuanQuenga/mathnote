@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""Start, pair, and stop the local MathNote bridge used by Codex."""
+
+import argparse
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+
+REPO = Path(__file__).resolve().parent.parent
+SERVER = REPO / "server" / "server.py"
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "mathnote"
+STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "mathnote"
+TOKEN_FILE = CONFIG / "device-token"
+PID_FILE = STATE / "bridge.json"
+LOG_FILE = STATE / "bridge.log"
+QR_FILE = CONFIG / "tablet-pairing.svg"
+PRIVATE_LANS = tuple(ipaddress.ip_network(network) for network in
+                     ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+
+
+def private_dir(path):
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
+
+
+def private_write(path, data):
+    private_dir(path.parent)
+    temporary = path.with_name(path.name + ".tmp-" + secrets.token_hex(4))
+    try:
+        with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as out:
+            out.write(data)
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def device_token():
+    private_dir(CONFIG)
+    if not TOKEN_FILE.exists():
+        private_write(TOKEN_FILE, secrets.token_hex(24) + "\n")
+    else:
+        TOKEN_FILE.chmod(0o600)
+    token = TOKEN_FILE.read_text().strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{32,128}", token):
+        raise RuntimeError(f"Invalid pairing token in {TOKEN_FILE}; it must be 32–128 hexadecimal characters")
+    return token
+
+
+def lan_ip(override=None):
+    try:
+        if override:
+            address = ipaddress.ip_address(override)
+        else:
+            # This chooses the address used for outbound LAN traffic without sending a packet.
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("192.0.2.1", 80))
+                address = ipaddress.ip_address(sock.getsockname()[0])
+    except (ValueError, OSError) as error:
+        raise RuntimeError("Could not choose a LAN IPv4 address; pass --lan-ip YOUR_LAN_IP") from error
+    if not any(address in network for network in PRIVATE_LANS):
+        raise RuntimeError("Use a private LAN IPv4 address in 10/8, 172.16/12, or 192.168/16")
+    return str(address)
+
+
+def server_url(ip, port):
+    return f"http://{ip}:{port}"
+
+
+def pairing_uri(url, token):
+    return "mathnote://pair?" + urlencode({"server": url, "token": token})
+
+
+def probe(port, token=None):
+    base = f"http://127.0.0.1:{port}"
+    try:
+        with urlopen(base + "/health", timeout=1.5) as response:
+            health = json.load(response)
+        if health.get("ok") is not True:
+            return None
+        if token is None:
+            return health
+        request = Request(base + "/annotations?page_id=__pair_probe__",
+                          headers={"X-Device-Token": token})
+        try:
+            with urlopen(request, timeout=1.5) as response:
+                status = response.status
+        except HTTPError as error:
+            status = error.code
+        return health if status in (200, 404) else None
+    except (URLError, TimeoutError, ValueError, OSError):
+        return None
+
+
+def proc_start_ticks(pid):
+    try:
+        # /proc/pid/stat contains a parenthesized command name with possible spaces.
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        return fields[19]  # Field 22, counting from the first field after comm.
+    except (FileNotFoundError, PermissionError, IndexError):
+        return None
+
+
+def managed_process():
+    try:
+        state = json.loads(PID_FILE.read_text())
+        pid = int(state["pid"])
+        if proc_start_ticks(pid) != state["start_ticks"]:
+            return None
+        if str(SERVER) not in Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace"):
+            return None
+        return state
+    except (FileNotFoundError, ValueError, KeyError, PermissionError, OSError):
+        return None
+
+
+def write_qr(uri):
+    python = REPO / "server" / ".venv" / "bin" / "python"
+    check = subprocess.run([str(python), "-c", "import qrcode.image.svg"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if check.returncode:
+        print("Installing the small QR encoder for tablet pairing...")
+        install = subprocess.run([str(python), "-m", "pip", "install", "--disable-pip-version-check",
+                                  "--quiet", "qrcode==8.2"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if install.returncode:
+            print("QR setup could not install. Use the manual pairing command below.")
+            return False
+    private_dir(CONFIG)
+    code = ("import qrcode,qrcode.image.svg,sys; "
+            "qrcode.make(sys.stdin.read(),image_factory=qrcode.image.svg.SvgPathImage).save(sys.argv[1])")
+    result = subprocess.run([str(python), "-c", code, str(QR_FILE)], input=uri, text=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if result.returncode:
+        print("QR generation failed. Use the manual pairing command below.")
+        return False
+    QR_FILE.chmod(0o600)
+    return True
+
+
+def show_pairing(ip, port, token, open_image=True):
+    url = server_url(ip, port)
+    print(f"Tablet server address: {url}")
+    print("The tablet and this computer must be on the same trusted Wi-Fi network.")
+    if write_qr(pairing_uri(url, token)):
+        print(f"Private pairing QR: {QR_FILE}")
+        print("Scan this QR with the tablet Camera, then open the link in MathNote.")
+        print("You can also tap MathNote's Connect button and paste the pairing link.")
+        print("Keep the QR private: it grants access to your synced notes on this network.")
+        if open_image and os.environ.get("DISPLAY") and shutil.which("xdg-open"):
+            subprocess.Popen(["xdg-open", str(QR_FILE)], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+    print("If QR scanning fails: ./scripts/mathnote-desktop pairing --show-token")
+    firewall_note(port)
+
+
+def firewall_note(port):
+    if not shutil.which("systemctl") or not shutil.which("firewall-cmd"):
+        return
+    active = subprocess.run(["systemctl", "is-active", "--quiet", "firewalld"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if active.returncode:
+        return
+    allowed = subprocess.run(["firewall-cmd", "--quiet", f"--query-port={port}/tcp"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if allowed.returncode:
+        print(f"Firewalld is active. If the tablet cannot connect, allow TCP {port} on your trusted network:")
+        print(f"  sudo firewall-cmd --add-port={port}/tcp --permanent")
+        print("  sudo firewall-cmd --reload")
+        print("The setup did not change your firewall.")
+
+
+def connect_codex():
+    subprocess.run([str(REPO / "scripts" / "connect-codex.sh")], check=True)
+
+
+def start(args):
+    if not shutil.which("codex"):
+        raise RuntimeError("Codex CLI is required for desktop MCP; install it, then rerun this command")
+    token = device_token()
+    ip = lan_ip(args.lan_ip)
+    connect_codex()
+    if probe(args.port, token):
+        print("MathNote bridge is already running with this tablet token.")
+        show_pairing(ip, args.port, token)
+        return
+    if probe(args.port):
+        raise RuntimeError(f"Port {args.port} has another MathNote bridge with a different token")
+    if managed_process():
+        raise RuntimeError("Managed bridge is running but not healthy; inspect the log or stop it first")
+    private_dir(STATE)
+    with os.fdopen(os.open(LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as log:
+        env = os.environ.copy()
+        env.update(MATHNOTE_TOKEN=token, MATHNOTE_HOST="0.0.0.0", MATHNOTE_PORT=str(args.port))
+        child = subprocess.Popen([sys.executable, str(SERVER)], cwd=SERVER.parent, env=env,
+                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
+    ticks = proc_start_ticks(child.pid)
+    if ticks is None:
+        raise RuntimeError(f"Bridge exited; inspect {LOG_FILE}")
+    private_write(PID_FILE, json.dumps({"pid": child.pid, "start_ticks": ticks,
+                                        "port": args.port}) + "\n")
+    for _ in range(30):
+        if probe(args.port, token):
+            print(f"MathNote bridge started (PID {child.pid}).")
+            show_pairing(ip, args.port, token)
+            return
+        if child.poll() is not None:
+            break
+        time.sleep(0.2)
+    raise RuntimeError(f"Bridge did not start; inspect {LOG_FILE}")
+
+
+def status(args):
+    running = managed_process()
+    health = probe(args.port)
+    if not health:
+        print("MathNote bridge is stopped on this port.")
+        return 1
+    owner = "managed by this command" if running and running["port"] == args.port else "started elsewhere"
+    token_ok = TOKEN_FILE.exists() and probe(args.port, TOKEN_FILE.read_text().strip()) is not None
+    print(f"MathNote bridge is running ({owner}); mode: {health.get('mode', 'unknown')}.")
+    print("Saved tablet token matches." if token_ok else "Saved tablet token does not authenticate.")
+    codex = subprocess.run(["codex", "mcp", "get", "mathnote"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL) if shutil.which("codex") else None
+    print("Codex MCP is registered." if codex and codex.returncode == 0
+          else "Codex MCP is not registered; run 'start'.")
+    return 0 if token_ok else 1
+
+
+def stop(args):
+    running = managed_process()
+    if not running:
+        print("No bridge managed by this command is running; an externally started bridge was not stopped.")
+        return
+    pid = running["pid"]
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(30):
+        if proc_start_ticks(pid) != running["start_ticks"]:
+            break
+        time.sleep(0.1)
+    PID_FILE.unlink(missing_ok=True)
+    print("MathNote bridge stopped. Codex remains registered for the next start.")
+
+
+def pairing(args):
+    token = device_token()
+    if not probe(args.port, token):
+        raise RuntimeError("Bridge is not running with your saved token; run 'start' first")
+    ip = lan_ip(args.lan_ip)
+    show_pairing(ip, args.port, token)
+    if args.show_token:
+        print(f"Private pairing link: {pairing_uri(server_url(ip, args.port), token)}")
+        print(f"Tablet token (keep private): {token}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Connect MathNote tablet notes to local Codex")
+    sub = parser.add_subparsers(dest="action", required=True)
+    for action in ("start", "status", "stop", "pairing"):
+        cmd = sub.add_parser(action)
+        cmd.add_argument("--port", type=int, default=8765)
+        if action in ("start", "pairing"):
+            cmd.add_argument("--lan-ip", help="private IPv4 address if automatic detection chooses the wrong adapter")
+        if action == "pairing":
+            cmd.add_argument("--show-token", action="store_true", help="print token for manual entry")
+    args = parser.parse_args()
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    try:
+        result = globals()[args.action](args)
+        return result or 0
+    except (RuntimeError, subprocess.CalledProcessError, OSError) as error:
+        print(f"Setup error: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

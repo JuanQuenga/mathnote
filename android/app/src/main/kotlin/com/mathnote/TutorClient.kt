@@ -48,12 +48,38 @@ object TutorClient {
         return try { response(connection) } finally { connection.disconnect() }
     }
 
+    /** Check reachability and the device token without uploading a page image. */
+    fun probe(server: String, token: String) {
+        val health = connect(server, "/health", "")
+        health.connectTimeout = 7000
+        health.readTimeout = 7000
+        try {
+            check(response(health).optBoolean("ok")) { "This address is not a MathNote server" }
+        } finally {
+            health.disconnect()
+        }
+        val connection = connect(server,
+            "/annotations?page_id=00000000-0000-0000-0000-000000000000", token)
+        connection.connectTimeout = 7000
+        connection.readTimeout = 7000
+        try {
+            when (val status = connection.responseCode) {
+                200, 404 -> Unit // A missing probe page still proves authentication succeeded.
+                401 -> throw IllegalStateException("Device token was rejected. Scan a fresh QR.")
+                else -> throw IllegalStateException("Server returned HTTP $status")
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun connect(server: String, path: String, token: String): HttpURLConnection {
         require(server.startsWith("http://") || server.startsWith("https://")) {
             "Server address must start with http:// or https://"
         }
         val url = URL(server.trimEnd('/') + path)
         return (url.openConnection() as HttpURLConnection).apply {
+            instanceFollowRedirects = false
             setRequestProperty("X-Device-Token", token)
         }
     }

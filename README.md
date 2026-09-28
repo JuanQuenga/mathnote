@@ -22,7 +22,17 @@ ChatGPT subscription billing and API billing are [separate](https://help.openai.
 
 ## Start the Linux server
 
-The HTTP bridge uses Python's standard library. For local mock testing:
+On the Linux computer that runs Codex, from this repository, run:
+
+```bash
+./scripts/mathnote-desktop start
+```
+
+This registers the local MCP server with Codex, starts the tablet bridge, and opens a private pairing QR if the computer has a desktop session. Scan the QR with the tablet Camera, then open its link in MathNote. You can also tap MathNote's **Connect** button and paste the pairing link. Keep the tablet and computer on the same trusted Wi-Fi network, then turn on **Live sync** on the page you want Codex to inspect. The QR includes a private device token; do not share it. Restart the Codex desktop app after the first registration, then ask it to use MathNote to read and mark your synced page. Use `./scripts/mathnote-desktop status` to check the bridge and `./scripts/mathnote-desktop stop` to stop a bridge this command started. `./scripts/mathnote-desktop pairing --show-token` gives a manual address and token if scanning fails. The token is saved privately at `~/.config/mathnote/device-token` and reused across restarts.
+
+The setup reports when Linux firewalld may block the tablet and shows the command to allow the bridge port; it does not change your firewall. Tablet access uses plain HTTP on your local network, so use a trusted Wi-Fi network. The local Codex MCP process stays on the Linux computer and does not require an OpenAI API key. It does not automatically connect ChatGPT mobile Work/Voice; see the [connection guide](docs/voice-and-mcp.md).
+
+For advanced manual setup or local mock testing, the HTTP bridge uses Python's standard library:
 
 ```bash
 cd server

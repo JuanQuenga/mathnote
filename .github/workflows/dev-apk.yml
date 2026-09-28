@@ -18,6 +18,10 @@ jobs:
           server/.venv/bin/pip install -r server/requirements.txt
           cd server
           .venv/bin/python -m unittest -v test_flow
+      - name: Test desktop pairing setup
+        run: |
+          server/.venv/bin/pip install qrcode==8.2
+          python3 -m unittest -v scripts.test_mathnote_desktop
       - name: Test authenticated remote MCP gateway
         run: |
           server/.venv/bin/pip install -r gateway/requirements.txt

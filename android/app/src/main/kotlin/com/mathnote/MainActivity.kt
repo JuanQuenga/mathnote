@@ -40,6 +40,7 @@ import kotlin.math.max
 class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
+    private val pairingWorker = Executors.newSingleThreadExecutor()
     private lateinit var store: NoteStore
     private lateinit var ink: InkView
     private lateinit var title: TextView
@@ -62,6 +63,8 @@ class MainActivity : Activity() {
     private var server = ""
     private var token = ""
     private var liveSync = false
+    private var connectionProbePending = false
+    private var connectionGeneration = 0L
     private var syncRevision = ""
     private var remoteFeedbackShown = false
     private var editGeneration = 0L
@@ -83,6 +86,12 @@ class MainActivity : Activity() {
         ink.load(store.loadPage(store.currentPage))
         updateTitle()
         showState("Notes are saved on this tablet. Share manually with ChatGPT or use a local model.")
+        handlePairingIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handlePairingIntent(intent)
     }
 
     private fun dp(n: Float) = (n * resources.displayMetrics.density + .5f).toInt()
@@ -131,6 +140,7 @@ class MainActivity : Activity() {
         root.addView(scroll)
         button("Notebooks", bar) { chooseBook() }
         button("Pages", bar) { choosePage() }
+        button("Connect", bar) { enterPairingLink() }
         button("+ Page", bar) {
             askName("New page", "Page ${store.currentBook.pages.size + 1}") { name ->
                 val page = store.createPage(store.currentBook, name)
@@ -251,6 +261,89 @@ class MainActivity : Activity() {
     }
     private fun showState(message: String) { if (::state.isInitialized) state.text = message }
     private fun cancel(task: Runnable?) { task?.let { handler.removeCallbacks(it) } }
+
+    private fun enterPairingLink() {
+        val input = EditText(this).apply {
+            setSingleLine(false)
+            maxLines = 3
+            hint = "mathnote://pair?..."
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        }
+        AlertDialog.Builder(this).setTitle("Connect to your computer")
+            .setMessage("Scan the QR from MathNote setup with your tablet Camera. If it does not open MathNote, paste the pairing link here. This connects your tablet to the local server; connecting ChatGPT or Codex is a separate step.")
+            .setView(input)
+            .setPositiveButton("Review link") { _, _ -> reviewPairingLink(Uri.parse(input.text.toString().trim())) }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun handlePairingIntent(incoming: Intent?) {
+        if (incoming?.action != Intent.ACTION_VIEW) return
+        val link = incoming.data ?: return
+        // Do not retain the device token in the Activity intent after the prompt appears.
+        setIntent(Intent(this, MainActivity::class.java))
+        reviewPairingLink(link)
+    }
+
+    private fun reviewPairingLink(link: Uri) {
+        val config = PairingLink.parse(link)
+        if (config == null) {
+            AlertDialog.Builder(this).setTitle("Invalid pairing link")
+                .setMessage("Use a fresh QR or pairing link from MathNote setup on your computer. No connection was changed.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        val syncNow = CheckBox(this).apply {
+            text = "Start live sync now (send this page to my computer)"
+            isChecked = false
+            setPadding(dp(18), 0, dp(18), 0)
+        }
+        AlertDialog.Builder(this).setTitle("Pair with ${Uri.parse(config.server).host}?")
+            .setMessage("Server: ${config.server}\n\nThe link contains a secret device token. Pair only with your own computer on a trusted network. The token grants access to your synced pages. Your notes remain on this tablet when you disconnect.")
+            .setView(syncNow)
+            .setPositiveButton("Pair") { _, _ -> applyPairing(config, syncNow.isChecked) }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun applyPairing(config: PairingConfig, syncNow: Boolean) {
+        val saved = getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putString("server", config.server).putString("token", config.token).commit()
+        if (!saved) {
+            showState("Could not save the connection. Try pairing again.")
+            return
+        }
+        connectionGeneration++
+        connectionProbePending = true
+        cancel(pendingSync)
+        cancel(pollMarks)
+        server = config.server
+        token = config.token
+        liveSync = false
+        liveButton.text = "Live sync off"
+        syncRevision = ""
+        ink.setAnnotations(null)
+        showState("Connection saved. Checking ${Uri.parse(server).host} without sending your page...")
+        val connection = connectionGeneration
+        pairingWorker.execute {
+            try {
+                TutorClient.probe(config.server, config.token)
+                runOnUiThread {
+                    if (connection != connectionGeneration) return@runOnUiThread
+                    connectionProbePending = false
+                    liveSync = syncNow
+                    liveButton.text = if (liveSync) "Live sync on" else "Live sync off"
+                    showState("Computer connected. ${if (liveSync) "Sending current page..." else "Live sync is off."}")
+                    if (liveSync) syncPage()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (connection == connectionGeneration) {
+                        connectionProbePending = false
+                        showState("Connection saved, but server unavailable: ${error.message}. Start the bridge on your computer, then tap Live sync.")
+                    }
+                }
+            }
+        }
+    }
 
     private fun edited() {
         editGeneration++
@@ -398,11 +491,17 @@ class MainActivity : Activity() {
         form.addView(TextView(this).apply {
             text = "Auto checks use only your local model, at most 40 per day. Local voice uses Android speech recognition and speech output. ChatGPT checks require a manual share."
         })
+        form.addView(TextView(this).apply {
+            text = "For easier setup, use Connect and scan the QR from your computer. Tablet pairing alone does not connect ChatGPT mobile; that requires a separate remote MCP setup."
+        })
         val scroll = ScrollView(this).apply { addView(form) }
         AlertDialog.Builder(this).setTitle("MathNote settings").setView(scroll)
             .setPositiveButton("Save") { _, _ ->
-                server = address.text.toString().trim()
-                token = secret.text.toString().trim()
+                val newServer = address.text.toString().trim()
+                val newToken = secret.text.toString().trim()
+                val connectionChanged = newServer != server || newToken != token
+                server = newServer
+                token = newToken
                 autoEnabled = auto.isChecked
                 fingerWriting = finger.isChecked
                 intervalSeconds = intArrayOf(30, 60, 120, 300)[spinner.selectedItemPosition]
@@ -411,6 +510,14 @@ class MainActivity : Activity() {
                     .putString("server", server).putString("token", token)
                     .putBoolean("auto", autoEnabled).putInt("interval", intervalSeconds)
                     .putBoolean("finger", fingerWriting).apply()
+                if (connectionChanged) {
+                    connectionGeneration++
+                    connectionProbePending = false
+                    cancel(pollMarks)
+                    syncRevision = ""
+                    ink.setAnnotations(null)
+                    if (liveSync) syncPage()
+                }
                 showState("Settings saved. Notes remain available offline.")
             }.setNegativeButton("Cancel", null).show()
     }
@@ -418,6 +525,10 @@ class MainActivity : Activity() {
     private fun snapshot(): List<InkView.Stroke> = InkCodec.decode(InkCodec.encode(ink.strokes()))
 
     private fun toggleLiveSync() {
+        if (connectionProbePending) {
+            showState("Checking the computer connection. Try Live sync again in a moment.")
+            return
+        }
         if (!liveSync && token.isEmpty()) {
             showState("Set the Linux server address and device token first.")
             return
@@ -440,6 +551,7 @@ class MainActivity : Activity() {
         val pageId = store.currentPage.id
         val pageTitle = store.currentPage.title
         val generation = editGeneration
+        val connection = connectionGeneration
         val strokes = snapshot()
         val address = server
         val auth = token
@@ -449,13 +561,17 @@ class MainActivity : Activity() {
                     .put("image", TutorClient.image(strokes))
                 val response = TutorClient.post(address, auth, "/sync", request)
                 runOnUiThread {
-                    if (!liveSync || pageId != store.currentPage.id || generation != editGeneration) return@runOnUiThread
+                    if (!liveSync || pageId != store.currentPage.id || generation != editGeneration ||
+                        connection != connectionGeneration) return@runOnUiThread
                     syncRevision = response.optString("revision")
                     showState("Page synced. Waiting for tutor marks from ChatGPT or Codex.")
                     refreshMarks()
                 }
             } catch (error: Exception) {
-                runOnUiThread { if (liveSync) showState("Page sync unavailable: ${error.message}") }
+                runOnUiThread {
+                    if (liveSync && connection == connectionGeneration)
+                        showState("Page sync unavailable: ${error.message}")
+                }
             }
         }
     }
@@ -464,13 +580,15 @@ class MainActivity : Activity() {
         if (!liveSync || syncRevision.isEmpty()) return
         val pageId = store.currentPage.id
         val revision = syncRevision
+        val connection = connectionGeneration
         val address = server
         val auth = token
         worker.execute {
             try {
                 val result = TutorClient.annotations(address, auth, pageId)
                 runOnUiThread {
-                    if (liveSync && pageId == store.currentPage.id && revision == syncRevision &&
+                    if (liveSync && connection == connectionGeneration &&
+                        pageId == store.currentPage.id && revision == syncRevision &&
                         revision == result.optString("revision")) {
                         val marks = result.optJSONArray("marks")
                         ink.setAnnotations(marks)
@@ -484,10 +602,10 @@ class MainActivity : Activity() {
                             remoteFeedbackShown = false
                         }
                     }
-                    scheduleMarkPoll()
+                    if (connection == connectionGeneration) scheduleMarkPoll()
                 }
             } catch (_: Exception) {
-                runOnUiThread { scheduleMarkPoll() }
+                runOnUiThread { if (connection == connectionGeneration) scheduleMarkPoll() }
             }
         }
     }
@@ -666,6 +784,7 @@ class MainActivity : Activity() {
         recognizer?.destroy()
         speaker?.shutdown()
         worker.shutdown()
+        pairingWorker.shutdown()
     }
 
     companion object { private const val AUDIO_PERMISSION = 42 }
